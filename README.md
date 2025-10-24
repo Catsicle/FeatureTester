@@ -1,15 +1,16 @@
 # Advanced Formula Tester
 
-A Streamlit application for experimenting with custom formulas, technical indicators, and correlation analysis against CSV data. The tool supports batching indicator creation, constant optimization, downloadable plots, and persistent feature storage so you can iterate quickly on trading or analytics ideas.
+A Streamlit-based laboratory for experimenting with technical indicators, parameterized formulas, and correlation analytics against CSV datasets. It supports batching indicator generation, constant optimisation, downloadable plots (JSON/CSV/PNG/JPG), and automatic persistence of engineered features between sessions.
 
 ## Features
 
-- Upload any CSV and limit processing to the first *N* rows for quick experimentation.
-- Queue multiple technical indicators (pandas-ta powered) and generate them in a single pass; derived columns persist across sessions via `<uploaded_name>_features.csv`.
+- Upload any CSV and limit processing to the first *N* rows (top-N, not random) for rapid iteration.
+- Queue multiple technical indicators (powered by `pandas-ta`) and generate them in one batch; derived features persist across sessions via `<uploaded_name>_features.csv`.
 - Evaluate formulas using coefficients (`a`, `b`, `c`, `d`, `k`) with safe divide-by-zero handling.
-- Optimize selected constants sequentially with automatic correlation tracking and logging.
-- Plot target vs. derived series or any set of numeric columns, download the data, Vega-Lite JSON spec, or rendered PNG/JPG images.
+- Optimise any subset of coefficients sequentially, with correlation tracking and optimisation history logging.
+- Plot target vs. derived series or any group of numeric columns, then download the data, Vega/Vega-Lite JSON spec, or rendered PNG/JPG images.
 - Compute correlation matrices and pairwise statistics for selected columns.
+- Searchable selectors for targets, indicator sources, and plotting columns.
 
 ## Quick Start
 
@@ -43,13 +44,16 @@ A Streamlit application for experimenting with custom formulas, technical indica
 
 ## Dependency Notes
 
-- `pandas-ta` supplies technical indicators and requires pandas >= 1.5.
-- `altair` powers the interactive charts; if absent, the app falls back to Streamlit line charts.
-- `matplotlib` is used to export PNG/JPG snapshots of charts. Without it, image downloads are omitted (JSON/CSV downloads remain available).
+- `pandas-ta` supplies technical indicators; requires pandas ≥ 1.5.
+- `altair` renders interactive charts. The app enables the `vegafusion` transformer automatically; ensure `vegafusion` and `vl-convert-python>=1.6` are installed (both listed in `requirements.txt`). Without Altair, it falls back to Streamlit line charts.
+- `matplotlib` enables exporting plots as PNG/JPG. If unavailable, the app still offers JSON/CSV downloads.
+- `vegafusion` lifts Altair's default 5k-row cap; included in `requirements.txt`.
 
 ## Persisted Indicators
 
 Generated indicators are stored in `./<uploaded_filename>_features.csv`. Re-uploading the same dataset will automatically merge those columns back into the working DataFrame, keeping your engineered features available between sessions.
+
+If you prefer a clean slate, delete the corresponding `*_features.csv` file before restarting the app.
 
 ## Publishing to GitHub
 

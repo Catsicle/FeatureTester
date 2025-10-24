@@ -14,6 +14,14 @@ try:
     import altair as alt
 except ImportError:  # pragma: no cover - graceful downgrade
     alt = None
+else:
+    try:
+        alt.data_transformers.enable("vegafusion")
+    except Exception:
+        try:
+            alt.data_transformers.disable_max_rows()
+        except Exception:
+            pass
 
 try:
     import pandas_ta as ta  # type: ignore
@@ -857,7 +865,7 @@ if "Derived Formula" in current_df.columns:
                 .interactive()
             )
             st.altair_chart(chart, use_container_width=True)
-            chart_json = chart.to_json(indent=2)
+            chart_json = chart.to_json(indent=2, format="vega")
             plot_source_csv = plot_source.to_csv(index=False)
             st.download_button(
                 "Download plot (Vega-Lite JSON)",
@@ -934,7 +942,7 @@ if selected_plot_columns:
                 .interactive()
             )
             st.altair_chart(custom_chart, use_container_width=True)
-            custom_chart_json = custom_chart.to_json(indent=2)
+            custom_chart_json = custom_chart.to_json(indent=2, format="vega")
             chart_source_csv = chart_source.to_csv(index=False)
             st.download_button(
                 "Download custom plot (Vega-Lite JSON)",
