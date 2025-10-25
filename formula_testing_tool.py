@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import os
 import re
 from itertools import combinations
 from pathlib import Path
@@ -8,6 +9,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+
+os.environ.setdefault("STREAMLIT_SERVER_MAX_UPLOAD_SIZE", "1024")
 import streamlit as st
 
 try:
@@ -107,19 +110,45 @@ def sanitize_basename(name: Optional[str]) -> str:
     return safe or "dataset"
 
 
-def build_plot_images(dataframe: pd.DataFrame, columns: List[str], title: str) -> Tuple[Optional[bytes], Optional[bytes]]:
+def build_plot_images(
+    dataframe: pd.DataFrame,
+    columns: List[str],
+    title: str,
+    *,
+    secondary: Optional[List[str]] = None,
+) -> Tuple[Optional[bytes], Optional[bytes]]:
     if plt is None or dataframe.empty or not columns:
         return None, None
     clean_df = dataframe[columns].copy()
     if clean_df.dropna(how="all").empty:
         return None, None
+    secondary = secondary or []
+    primary_columns = [col for col in columns if col not in secondary]
+    if not primary_columns:
+        primary_columns = columns
+        secondary = []
     try:
         fig, ax = plt.subplots(figsize=(10, 5))
-        clean_df.plot(ax=ax)
+        index_values = clean_df.index
+        for col in primary_columns:
+            ax.plot(index_values, clean_df[col], label=col)
         ax.set_title(title or "Plot")
         ax.set_xlabel("Row Index")
-        ax.set_ylabel("Value")
-        ax.legend(loc="best")
+        ax.set_ylabel(", ".join(primary_columns))
+
+        secondary_handles: List[Any] = []
+        secondary_labels: List[str] = []
+        if secondary:
+            ax_secondary = ax.twinx()
+            for col in secondary:
+                ax_secondary.plot(index_values, clean_df[col], label=col, linestyle="--")
+            ax_secondary.set_ylabel(", ".join(secondary))
+            secondary_handles = ax_secondary.get_lines()
+            secondary_labels = [line.get_label() for line in secondary_handles]
+        handles = ax.get_lines() + secondary_handles
+        labels = [line.get_label() for line in ax.get_lines()] + secondary_labels
+        if handles:
+            ax.legend(handles, labels, loc="best")
         fig.tight_layout()
         buffer_png = io.BytesIO()
         fig.savefig(buffer_png, format="png", dpi=200)
@@ -127,7 +156,7 @@ def build_plot_images(dataframe: pd.DataFrame, columns: List[str], title: str) -
         buffer_jpg = io.BytesIO()
         fig.savefig(buffer_jpg, format="jpeg", dpi=200)
         buffer_jpg.seek(0)
-        plt.close(fig)
+        plt.close(fig)  # Close the figure to avoid resource leaks
         return buffer_png.getvalue(), buffer_jpg.getvalue()
     except Exception:
         plt.close("all")
@@ -846,29 +875,81 @@ if "Derived Formula" in current_df.columns:
         correlation_value = merged.iloc[:, 0].corr(merged.iloc[:, 1])
         st.metric("Pearson Correlation", format_correlation(correlation_value))
 
-        plot_source = (
-            current_df[[target_column, "Derived Formula"]]
-            .reset_index()
-            .melt("index", var_name="Series", value_name="Value")
-        )
+        comparison_df = current_df[[target_column, "Derived Formula"]].reset_index()
+        plot_source = comparison_df.melt("index", var_name="Series", value_name="Value")
 
         if alt is not None:
-            chart = (
-                alt.Chart(plot_source)
-                .mark_line()
-                .encode(
-                    x=alt.X("index:Q", title="Row Index"),
-                    y=alt.Y("Value:Q", scale=alt.Scale(zero=False)),
-                    color="Series:N",
-                    tooltip=["index:Q", "Series:N", alt.Tooltip("Value:Q", format=".4f")],
+            target_color = "#1f77b4"
+            derived_color = "#ff7f0e"
+            derived_values = comparison_df["Derived Formula"].to_numpy()
+            finite_mask = np.isfinite(derived_values)
+            if finite_mask.any():
+                finite_values = derived_values[finite_mask]
+                derived_min = float(finite_values.min())
+                derived_max = float(finite_values.max())
+                span = derived_max - derived_min
+                if not np.isfinite(span) or span <= 1e-9:
+                    baseline = derived_min if np.isfinite(derived_min) else 0.0
+                    padding = max(abs(baseline) * 0.05, 1.0)
+                    domain_min = baseline - padding
+                    domain_max = baseline + padding
+                else:
+                    padding = max(span * 0.1, 1e-6)
+                    domain_min = derived_min - padding
+                    domain_max = derived_max + padding
+            else:
+                domain_min, domain_max = -1.0, 1.0
+            if domain_max <= domain_min:
+                center = 0.5 * (domain_min + domain_max)
+                domain_min = center - 1.0
+                domain_max = center + 1.0
+            derived_scale = alt.Scale(domain=(domain_min, domain_max), clamp=False, nice=False)
+            tooltip_fields = [
+                alt.Tooltip("index:Q", title="Row"),
+                alt.Tooltip(f"{target_column}:Q", title=target_column, format=".4f"),
+                alt.Tooltip("Derived Formula:Q", title="Derived Formula", format=".4f"),
+            ]
+            base_chart = alt.Chart(comparison_df)
+            target_line = base_chart.mark_line(color=target_color).encode(
+                x=alt.X("index:Q", title="Row Index"),
+                y=alt.Y(
+                    f"{target_column}:Q",
+                    axis=alt.Axis(title=target_column, titleColor=target_color, orient="left"),
+                    scale=alt.Scale(zero=False),
+                ),
+                tooltip=tooltip_fields,
+            )
+            derived_line = base_chart.mark_line(color=derived_color).encode(
+                x=alt.X(
+                    "index:Q",
+                    title="Row Index",
+                ),
+                y=alt.Y(
+                    "Derived Formula:Q",
+                    axis=alt.Axis(title="Derived Formula", titleColor=derived_color, orient="right"),
+                    scale=derived_scale,
+                ),
+                tooltip=tooltip_fields,
+            )
+            derived_layers = [derived_line]
+            if domain_min <= 0.0 <= domain_max:
+                zero_rule = (
+                    alt.Chart(pd.DataFrame({"zero": [0.0]}))
+                    .mark_rule(color="#888", strokeDash=[4, 4])
+                    .encode(y=alt.Y("zero:Q", scale=derived_scale))
                 )
-                .interactive()
+                derived_layers.append(zero_rule)
+            x_zoom = alt.selection_interval(bind="scales", encodings=["x"])
+            chart = (
+                alt.layer(target_line, *derived_layers)
+                .resolve_scale(y="independent")
+                .add_params(x_zoom)
             )
             st.altair_chart(chart, use_container_width=True)
             chart_json = chart.to_json(indent=2, format="vega")
             plot_source_csv = plot_source.to_csv(index=False)
             st.download_button(
-                "Download plot (Vega-Lite JSON)",
+                "Download plot (Vega JSON)",
                 data=chart_json,
                 file_name="target_vs_formula_chart.json",
                 mime="application/json",
@@ -882,7 +963,16 @@ if "Derived Formula" in current_df.columns:
                 key="download_main_chart_csv",
             )
         else:  # pragma: no cover - fallback when Altair unavailable
-            st.line_chart(current_df[[target_column, "Derived Formula"]])
+            png_preview, _ = build_plot_images(
+                current_df,
+                [target_column, "Derived Formula"],
+                "Target vs Derived Formula",
+                secondary=["Derived Formula"],
+            )
+            if png_preview:
+                st.image(png_preview, caption="Target vs Derived Formula", use_column_width=True)
+            else:
+                st.line_chart(current_df[[target_column, "Derived Formula"]])
             plot_source_csv = plot_source.to_csv(index=False)
             st.download_button(
                 "Download plot data (CSV)",
@@ -896,6 +986,7 @@ if "Derived Formula" in current_df.columns:
             current_df,
             [target_column, "Derived Formula"],
             "Target vs Derived Formula",
+            secondary=["Derived Formula"],
         )
         if png_bytes:
             st.download_button(
