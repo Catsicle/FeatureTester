@@ -5,7 +5,7 @@ import os
 import re
 from itertools import combinations
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -51,7 +51,9 @@ if "raw_df" not in st.session_state:
 if "df" not in st.session_state:
     st.session_state.df = None
 if "sample_size" not in st.session_state:
-    st.session_state.sample_size = 100
+    st.session_state.sample_size = 250
+if "sample_size_input" not in st.session_state:
+    st.session_state.sample_size_input = st.session_state.sample_size
 if "applied_sample_size" not in st.session_state:
     st.session_state.applied_sample_size = None
 if "added_features" not in st.session_state:
@@ -128,7 +130,12 @@ def build_plot_images(
         primary_columns = columns
         secondary = []
     try:
-        fig, ax = plt.subplots(figsize=(10, 5))
+        desired_width_px = 720
+        desired_height_px = 360
+        dpi = 200
+        fig_width = desired_width_px / dpi
+        fig_height = desired_height_px / dpi
+        fig, ax = plt.subplots(figsize=(fig_width, fig_height), dpi=dpi)
         index_values = clean_df.index
         for col in primary_columns:
             ax.plot(index_values, clean_df[col], label=col)
@@ -151,10 +158,10 @@ def build_plot_images(
             ax.legend(handles, labels, loc="best")
         fig.tight_layout()
         buffer_png = io.BytesIO()
-        fig.savefig(buffer_png, format="png", dpi=200)
+        fig.savefig(buffer_png, format="png", dpi=dpi)
         buffer_png.seek(0)
         buffer_jpg = io.BytesIO()
-        fig.savefig(buffer_jpg, format="jpeg", dpi=200)
+        fig.savefig(buffer_jpg, format="jpeg", dpi=dpi)
         buffer_jpg.seek(0)
         plt.close(fig)  # Close the figure to avoid resource leaks
         return buffer_png.getvalue(), buffer_jpg.getvalue()
@@ -266,6 +273,18 @@ def compute_indicator(
             col_name = f"MIN_{source_column}_{window_int}"
             df[col_name] = df[source_column].rolling(window=window_int, min_periods=1).min()
             new_columns.append(col_name)
+        elif indicator_type == "Rolling Median Absolute Deviation":
+            col_name = f"MAD_{source_column}_{window_int}"
+            rolling_window = df[source_column].rolling(window=window_int, min_periods=1)
+
+            def _mad(values: np.ndarray) -> float:
+                median_val = np.nanmedian(values)
+                if np.isnan(median_val):
+                    return np.nan
+                return float(np.nanmedian(np.abs(values - median_val)))
+
+            df[col_name] = rolling_window.apply(_mad, raw=True)
+            new_columns.append(col_name)
         elif indicator_type == "Lag (T-n)":
             col_name = f"LAG_{source_column}_{lag_periods}"
             df[col_name] = df[source_column].shift(lag_periods)
@@ -294,6 +313,175 @@ def compute_indicator(
         return df, []
 
     return df, new_columns
+
+
+AUTO_FEATURE_RULES: List[Tuple[re.Pattern[str], Callable[[re.Match[str]], Dict[str, Any]]]] = [
+    (
+        re.compile(r"^SMA_(?P<source>.+)_(?P<window>\d+)$"),
+        lambda match: {
+            "type": "Rolling Mean (SMA)",
+            "source": match.group("source"),
+            "window": int(match.group("window")),
+        },
+    ),
+    (
+        re.compile(r"^EMA_(?P<source>.+)_(?P<window>\d+)$"),
+        lambda match: {
+            "type": "EMA",
+            "source": match.group("source"),
+            "window": int(match.group("window")),
+        },
+    ),
+    (
+        re.compile(r"^MEDIAN_(?P<source>.+)_(?P<window>\d+)$"),
+        lambda match: {
+            "type": "Rolling Median",
+            "source": match.group("source"),
+            "window": int(match.group("window")),
+        },
+    ),
+    (
+        re.compile(r"^STD_(?P<source>.+)_(?P<window>\d+)$"),
+        lambda match: {
+            "type": "Rolling Std Dev",
+            "source": match.group("source"),
+            "window": int(match.group("window")),
+        },
+    ),
+    (
+        re.compile(r"^STD_SAMPLE_(?P<source>.+)_(?P<window>\d+)$"),
+        lambda match: {
+            "type": "Rolling Std Dev (Sample)",
+            "source": match.group("source"),
+            "window": int(match.group("window")),
+        },
+    ),
+    (
+        re.compile(r"^MAX_(?P<source>.+)_(?P<window>\d+)$"),
+        lambda match: {
+            "type": "Rolling Max",
+            "source": match.group("source"),
+            "window": int(match.group("window")),
+        },
+    ),
+    (
+        re.compile(r"^MIN_(?P<source>.+)_(?P<window>\d+)$"),
+        lambda match: {
+            "type": "Rolling Min",
+            "source": match.group("source"),
+            "window": int(match.group("window")),
+        },
+    ),
+    (
+        re.compile(r"^MAD_(?P<source>.+)_(?P<window>\d+)$"),
+        lambda match: {
+            "type": "Rolling Median Absolute Deviation",
+            "source": match.group("source"),
+            "window": int(match.group("window")),
+        },
+    ),
+    (
+        re.compile(r"^LAG_(?P<source>.+)_(?P<lag>\d+)$"),
+        lambda match: {
+            "type": "Lag (T-n)",
+            "source": match.group("source"),
+            "lag": int(match.group("lag")),
+        },
+    ),
+    (
+        re.compile(r"^DIFF_(?P<source>.+)_(?P<lag>\d+)$"),
+        lambda match: {
+            "type": "Difference (T-n)",
+            "source": match.group("source"),
+            "lag": int(match.group("lag")),
+        },
+    ),
+]
+
+
+def auto_generate_feature(column_name: str) -> bool:
+    for pattern, builder in AUTO_FEATURE_RULES:
+        match = pattern.match(column_name)
+        if not match:
+            continue
+        params = builder(match)
+        source_column = params.get("source")
+        if not source_column:
+            return False
+
+        base_df = st.session_state.raw_df
+        used_raw = True
+        if base_df is None:
+            base_df = st.session_state.df
+            used_raw = False
+        if base_df is None or source_column not in base_df.columns:
+            return False
+
+        definition: Dict[str, Any] = {
+            "type": params.get("type"),
+            "source": source_column,
+        }
+        if "window" in params:
+            definition["window"] = int(params["window"])
+        if "lag" in params:
+            definition["lag"] = int(params["lag"])
+
+        working_df = base_df.drop(columns=["Derived Formula"], errors="ignore").copy()
+        updated_df, new_columns = compute_indicator(working_df, definition.copy(), show_feedback=False)
+        if column_name not in new_columns:
+            return False
+
+        definition["columns"] = new_columns
+
+        if used_raw:
+            st.session_state.raw_df = updated_df.copy()
+            persist_feature_columns(updated_df, new_columns)
+            source_for_sample = st.session_state.raw_df
+        else:
+            st.session_state.df = updated_df.copy()
+            source_for_sample = st.session_state.df
+
+        existing_definition = None
+        for item in st.session_state.feature_definitions:
+            if (
+                item.get("type") == definition.get("type")
+                and item.get("source") == definition.get("source")
+                and int(item.get("window", -1)) == int(definition.get("window", -1))
+                and int(item.get("lag", -1)) == int(definition.get("lag", -1))
+            ):
+                existing_definition = item
+                break
+
+        if existing_definition is not None:
+            existing_definition["columns"] = new_columns
+        else:
+            st.session_state.feature_definitions.append(definition)
+
+        sample_size = st.session_state.sample_size
+        if source_for_sample is not None:
+            if sample_size and sample_size > 0 and sample_size < len(source_for_sample):
+                st.session_state.df = source_for_sample.iloc[: sample_size].copy().reset_index(drop=True)
+            else:
+                st.session_state.df = source_for_sample.copy().reset_index(drop=True)
+            st.session_state.applied_sample_size = int(sample_size)
+
+        update_available_features()
+        return True
+
+    return False
+
+
+def ensure_formula_features(formula: str) -> None:
+    if not formula or st.session_state.df is None:
+        return
+
+    candidate_names = set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", formula))
+    candidate_names.difference_update({"a", "b", "c", "d", "k", "np"})
+
+    for name in list(candidate_names):
+        if name in st.session_state.df.columns:
+            continue
+        auto_generate_feature(name)
 
 
 def reapply_feature_definitions(base_df: pd.DataFrame) -> pd.DataFrame:
@@ -406,7 +594,8 @@ if uploaded_file is not None:
         st.session_state.added_features = []
     st.session_state.raw_df = combined_df.copy()
     st.session_state.df = combined_df.copy()
-    st.session_state.sample_size = min(100, len(uploaded_df))
+    st.session_state.sample_size = min(250, len(uploaded_df))
+    st.session_state.sample_size_input = st.session_state.sample_size
     st.session_state.applied_sample_size = None
     st.session_state.feature_definitions = []
     st.session_state.optimization_log = []
@@ -426,23 +615,28 @@ if (
     and st.session_state.sample_size == 0
     and max_rows > 0
 ):
-    st.session_state.sample_size = min(100, max_rows)
+    st.session_state.sample_size = min(250, max_rows)
+    st.session_state.sample_size_input = st.session_state.sample_size
 elif st.session_state.sample_size > max_rows:
     st.session_state.sample_size = max_rows
+    st.session_state.sample_size_input = st.session_state.sample_size
 
-sample_step = max(1, max_rows // 50) if max_rows else 1
-sample_size = st.sidebar.number_input(
+sample_step = 1
+sample_size_value = st.sidebar.number_input(
     "Rows to use (0 = all rows)",
     min_value=0,
     max_value=max_rows,
-    value=int(st.session_state.sample_size),
     step=sample_step,
-    key="sample_size",
+    key="sample_size_input",
     help=(
         "Limit the working dataset to the first N rows to speed up calculations. "
         "Changing this resets generated indicators."
     ),
 )
+sample_size = int(sample_size_value)
+if st.session_state.sample_size != sample_size:
+    st.session_state.sample_size = sample_size
+    st.session_state.sample_size_input = sample_size
 
 sampling_changed = False
 
@@ -552,12 +746,13 @@ indicator_type = st.sidebar.selectbox(
         "EMA",
         "Rolling Median",
         "Rolling Std Dev",
-    "Rolling Std Dev (Sample)",
+        "Rolling Std Dev (Sample)",
         "Rolling Max",
         "Rolling Min",
         "Lag (T-n)",
         "Difference (T-n)",
         "Bollinger Bands",
+        "Rolling Median Absolute Deviation",
     ),
 )
 source_search_term = st.sidebar.text_input(
@@ -824,6 +1019,8 @@ if optimize_constants_clicked:
                         f"Updated constants: {summary_text} (corr {format_correlation(optimized_corr)})"
                     )
 
+ensure_formula_features(formula_string)
+
 working_df = st.session_state.df.drop(columns=["Derived Formula"], errors="ignore")
 result_df = working_df.copy()
 derived_series: Optional[pd.Series] = None
@@ -944,6 +1141,7 @@ if "Derived Formula" in current_df.columns:
                 alt.layer(target_line, *derived_layers)
                 .resolve_scale(y="independent")
                 .add_params(x_zoom)
+                .properties(width=720)
             )
             st.altair_chart(chart, use_container_width=True)
             chart_json = chart.to_json(indent=2, format="vega")
